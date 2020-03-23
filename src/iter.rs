@@ -25,6 +25,7 @@ where
 }
 
 /// Wraps an iterator to display its progress.
+#[derive(Debug)]
 pub struct ProgressBarIter<T> {
     it: T,
     progress: ProgressBar,

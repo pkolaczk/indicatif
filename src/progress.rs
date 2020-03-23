@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use crate::style::ProgressStyle;
 use crate::utils::{duration_to_secs, secs_to_duration, Estimate};
 use console::Term;
+use crate::{ProgressIterator, ProgressBarIter};
 
 /// The drawn state of an element.
 #[derive(Clone, Debug)]
@@ -711,10 +712,7 @@ impl ProgressBar {
     /// }
     /// ```
     pub fn wrap_iter<It: Iterator>(&self, it: It) -> ProgressBarIter<It> {
-        ProgressBarIter {
-            bar: self.clone(),
-            it,
-        }
+        it.progress_with(self.clone())
     }
 
     /// Wraps a Reader with the progress bar.
@@ -1138,26 +1136,6 @@ impl MultiProgress {
     }
 }
 
-/// Iterator for `wrap_iter`.
-#[derive(Debug)]
-pub struct ProgressBarIter<I> {
-    bar: ProgressBar,
-    it: I,
-}
-
-impl<I: Iterator> Iterator for ProgressBarIter<I> {
-    type Item = I::Item;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let item = self.it.next();
-
-        if item.is_some() {
-            self.bar.inc(1);
-        }
-
-        item
-    }
-}
 
 /// wraps an io-object, either a Reader or a Writer (or both).
 ///
@@ -1192,6 +1170,7 @@ impl<W: io::Write> io::Write for ProgressBarWrap<W> {
             inc
         })
     }
+
     fn flush(&mut self) -> io::Result<()> {
         self.wrap.flush()
     }
@@ -1202,11 +1181,13 @@ impl<W: io::Write> io::Write for ProgressBarWrap<W> {
             inc
         })
     }
+
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
         self.wrap.write_all(buf).map(|()| {
             self.bar.inc(buf.len() as u64);
         })
     }
+
     // write_fmt can not be captured with reasonable effort.
     // as it uses write_all internally by default that should not be a problem.
     // fn write_fmt(&mut self, fmt: fmt::Arguments) -> io::Result<()>;

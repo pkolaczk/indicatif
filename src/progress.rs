@@ -2,8 +2,7 @@ use std::fmt;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Arc;
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -29,16 +28,29 @@ struct ProgressDrawState {
 }
 
 #[derive(Debug)]
-enum Status {
+enum StatusKind {
     InProgress,
-    DoneVisible,
-    DoneHidden,
+    Done,
+}
+
+#[derive(Debug)]
+struct Status {
+    pub kind: StatusKind,
+    pub visible: bool,
+}
+
+impl Default for Status {
+    fn default() -> Self {
+        Self {
+            kind: StatusKind::InProgress,
+            visible: true,
+        }
+    }
 }
 
 enum ProgressDrawTargetKind {
     Term(Term, Option<ProgressDrawState>, Option<Duration>),
     Remote(usize, Mutex<Sender<(usize, ProgressDrawState)>>),
-    Hidden,
 }
 
 /// Target for draw operations
@@ -116,22 +128,12 @@ impl ProgressDrawTarget {
         }
     }
 
-    /// A hidden draw target.
-    ///
-    /// This forces a progress bar to be not rendered at all.
-    pub fn hidden() -> ProgressDrawTarget {
-        ProgressDrawTarget {
-            kind: ProgressDrawTargetKind::Hidden,
-        }
-    }
-
     /// Returns true if the draw target is hidden.
     ///
     /// This is internally used in progress bars to figure out if overhead
     /// from drawing can be prevented.
     pub fn is_hidden(&self) -> bool {
         match self.kind {
-            ProgressDrawTargetKind::Hidden => true,
             ProgressDrawTargetKind::Term(ref term, ..) => !term.is_term(),
             _ => false,
         }
@@ -171,7 +173,6 @@ impl ProgressDrawTarget {
                     .send((idx, draw_state))
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e));
             }
-            ProgressDrawTargetKind::Hidden => {}
         }
         Ok(())
     }
@@ -196,7 +197,6 @@ impl ProgressDrawTarget {
                     ))
                     .ok();
             }
-            ProgressDrawTargetKind::Hidden => {}
         };
     }
 }
@@ -250,20 +250,16 @@ impl ProgressState {
 
     /// Indicates that the progress bar finished.
     pub fn is_finished(&self) -> bool {
-        match self.status {
-            Status::InProgress => false,
-            Status::DoneVisible => true,
-            Status::DoneHidden => true,
+        match self.status.kind {
+            StatusKind::Done => true,
+            StatusKind::InProgress => false,
         }
     }
 
     /// Returns `false` if the progress bar should no longer be
     /// drawn.
     pub fn should_render(&self) -> bool {
-        match self.status {
-            Status::DoneHidden => false,
-            _ => true,
-        }
+        self.status.visible
     }
 
     /// Returns the completion as a floating-point number between 0 and 1
@@ -357,7 +353,9 @@ impl ProgressBar {
     /// This progress bar still responds to API changes but it does not
     /// have a length or render in any way.
     pub fn hidden() -> ProgressBar {
-        ProgressBar::with_draw_target(!0, ProgressDrawTarget::hidden())
+        let pb = ProgressBar::new(!0);
+        pb.set_visible(false);
+        pb
     }
 
     /// Creates a new progress bar with a given length and draw target.
@@ -374,7 +372,7 @@ impl ProgressBar {
                 tick: 0,
                 draw_delta: 0,
                 draw_next: 0,
-                status: Status::InProgress,
+                status: Status::default(),
                 started: Instant::now(),
                 est: Estimate::new(),
                 tick_thread: None,
@@ -499,12 +497,24 @@ impl ProgressBar {
         })
     }
 
-    /// A quick convenience check if the progress bar is hidden.
-    pub fn is_hidden(&self) -> bool {
-        self.state.read().unwrap().draw_target.is_hidden()
+    /// Changes the progress bar's visibility. `ProgressBar::println` will still print to the console
+    /// even after setting visibility to `false`.
+    ///
+    /// **Note:** Even after setting visibility to `true`, the progress bar may not be drawn if
+    /// the draw target is hidden (see `ProgressDrawTarget::is_hidden`).
+    pub fn set_visible(&self, visible: bool) {
+        self.update_and_draw(|state| {
+            state.status.visible = visible;
+        })
     }
 
-    // Indicates that the progress bar finished.
+    /// Returns true when the progress bar is visible _and_ the draw target is not hidden.
+    pub fn is_visible(&self) -> bool {
+        let state = self.state.read().unwrap();
+        state.status.visible && !state.draw_target.is_hidden()
+    }
+
+    /// Indicates that the progress bar finished.
     pub fn is_finished(&self) -> bool {
         self.state.read().unwrap().is_finished()
     }
@@ -614,7 +624,7 @@ impl ProgressBar {
         self.update_and_draw(|state| {
             state.draw_next = 0;
             state.pos = 0;
-            state.status = Status::InProgress;
+            state.status.kind = StatusKind::InProgress;
         });
     }
 
@@ -623,7 +633,7 @@ impl ProgressBar {
         self.update_and_draw(|state| {
             state.pos = state.len;
             state.draw_next = state.pos;
-            state.status = Status::DoneVisible;
+            state.status.kind = StatusKind::Done;
         });
     }
 
@@ -631,7 +641,7 @@ impl ProgressBar {
     pub fn finish_at_current_pos(&self) {
         self.update_and_draw(|state| {
             state.draw_next = state.pos;
-            state.status = Status::DoneVisible;
+            state.status.kind = StatusKind::Done;
         });
     }
 
@@ -645,7 +655,8 @@ impl ProgressBar {
             state.message = msg;
             state.pos = state.len;
             state.draw_next = state.pos;
-            state.status = Status::DoneVisible;
+            state.status.kind = StatusKind::Done;
+            state.status.visible = true;
         });
     }
 
@@ -654,14 +665,15 @@ impl ProgressBar {
         self.update_and_draw(|state| {
             state.pos = state.len;
             state.draw_next = state.pos;
-            state.status = Status::DoneHidden;
+            state.status.kind = StatusKind::Done;
+            state.status.visible = false;
         });
     }
 
     /// Finishes the progress bar and leaves the current message and progress.
     pub fn abandon(&self) {
         self.update_and_draw(|state| {
-            state.status = Status::DoneVisible;
+            state.status.kind = StatusKind::Done;
         });
     }
 
@@ -673,7 +685,8 @@ impl ProgressBar {
         let msg = msg.to_string();
         self.update_and_draw(|state| {
             state.message = msg;
-            state.status = Status::DoneVisible;
+            state.status.kind = StatusKind::Done;
+            state.status.visible = true;
         });
     }
 
@@ -808,7 +821,7 @@ impl Drop for ProgressState {
             return;
         }
 
-        self.status = Status::DoneHidden;
+        self.status.kind = StatusKind::Done;
         if self.pos >= self.draw_next {
             self.draw_next = self.pos.saturating_add(self.draw_delta);
             draw_state(self).ok();
@@ -830,16 +843,14 @@ fn test_pbar_maxu64() {
 
 #[test]
 fn test_pbar_overflow() {
-    let pb = ProgressBar::new(1);
-    pb.set_draw_target(ProgressDrawTarget::hidden());
+    let pb = ProgressBar::hidden();
     pb.inc(2);
     pb.finish();
 }
 
 #[test]
 fn test_get_position() {
-    let pb = ProgressBar::new(1);
-    pb.set_draw_target(ProgressDrawTarget::hidden());
+    let pb = ProgressBar::hidden();
     pb.inc(2);
     let pos = pb.position();
     assert_eq!(pos, 2);
@@ -854,6 +865,7 @@ struct MultiProgressState {
     objects: Vec<MultiObject>,
     draw_target: ProgressDrawTarget,
     move_cursor: bool,
+    visible: bool,
 }
 
 /// Manages multiple progress bars from different threads.
@@ -896,6 +908,7 @@ impl MultiProgress {
                 objects: vec![],
                 draw_target,
                 move_cursor: false,
+                visible: true,
             }),
             joining: AtomicBool::new(false),
             tx,
@@ -916,6 +929,21 @@ impl MultiProgress {
     /// progress bars.
     pub fn set_move_cursor(&self, move_cursor: bool) {
         self.state.write().unwrap().move_cursor = move_cursor;
+    }
+
+    /// Changes the progress bar's visibility. `ProgressBar::println` will still print to the console
+    /// even after setting visibility to `false`.
+    ///
+    /// **Note:** Even after setting visibility to `true`, the progress bar may not be drawn if
+    /// the draw target is hidden (see `ProgressDrawTarget::is_hidden`).
+    pub fn set_visible(&self, visible: bool) {
+        self.state.write().unwrap().visible = visible;
+    }
+
+    /// Returns true when the progress bar is visible _and_ the draw target is not hidden.
+    pub fn is_visible(&self) -> bool {
+        let state = self.state.read().unwrap();
+        state.visible && !state.draw_target.is_hidden()
     }
 
     /// Adds a progress bar.
@@ -1008,9 +1036,11 @@ impl MultiProgress {
             let orphan_lines_count = orphan_lines.len();
             lines.extend(orphan_lines);
 
-            for obj in state.objects.iter() {
-                if let Some(ref draw_state) = obj.draw_state {
-                    lines.extend_from_slice(&draw_state.lines[..]);
+            if state.visible {
+                for obj in state.objects.iter() {
+                    if let Some(ref draw_state) = obj.draw_state {
+                        lines.extend_from_slice(&draw_state.lines[..]);
+                    }
                 }
             }
 

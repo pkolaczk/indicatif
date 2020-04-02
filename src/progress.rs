@@ -1,8 +1,9 @@
 use std::fmt;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Weak, Mutex, RwLock, TryLockError};
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Arc, Weak};
+use std::sync::{Mutex, RwLock, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -602,7 +603,7 @@ impl ProgressBar {
     }
 
     /// Creates a new Weak pointer to this ProgressBar.
-    pub fn downgrade(this: &Self) -> WeakProgressBar {
+    pub fn downgrade(&self) -> WeakProgressBar {
         WeakProgressBar {
             state: Arc::downgrade(&this.state),
         }
@@ -833,7 +834,7 @@ pub struct WeakProgressBar {
 impl WeakProgressBar {
     /// Attempts to upgrade the Weak pointer to a ProgressBar, delaying dropping of the inner value
     /// if successful. Returns None if the inner value has since been dropped.
-    fn upgrade(&self) -> Option<ProgressBar> {
+    pub fn upgrade(&self) -> Option<ProgressBar> {
         self.state.upgrade().map(|state| ProgressBar {
             state
         })

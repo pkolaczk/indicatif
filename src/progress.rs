@@ -1,9 +1,9 @@
 use std::fmt;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Arc;
-use std::sync::{Mutex, RwLock};
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Weak};
+use std::sync::{Mutex, RwLock, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -24,19 +24,34 @@ struct ProgressDrawState {
     pub force_draw: bool,
     /// True if we should move the cursor up when possible instead of clearing lines.
     pub move_cursor: bool,
+    /// Time when the draw state was created.
+    pub ts: Instant,
 }
 
 #[derive(Debug)]
-enum Status {
+enum StatusKind {
     InProgress,
-    DoneVisible,
-    DoneHidden,
+    Done,
+}
+
+#[derive(Debug)]
+struct Status {
+    pub kind: StatusKind,
+    pub visible: bool,
+}
+
+impl Default for Status {
+    fn default() -> Self {
+        Self {
+            kind: StatusKind::InProgress,
+            visible: true,
+        }
+    }
 }
 
 enum ProgressDrawTargetKind {
-    Term(Term, Option<ProgressDrawState>, Option<Duration>, Option<Instant>),
+    Term(Term, Option<ProgressDrawState>, Option<Duration>),
     Remote(usize, Mutex<Sender<(usize, ProgressDrawState)>>),
-    Hidden,
 }
 
 /// Target for draw operations
@@ -110,16 +125,7 @@ impl ProgressDrawTarget {
     pub fn to_term(term: Term, refresh_rate: impl Into<Option<u64>>) -> ProgressDrawTarget {
         let rate = refresh_rate.into().map(|x| Duration::from_millis(1000 / x));
         ProgressDrawTarget {
-            kind: ProgressDrawTargetKind::Term(term, None, rate, None),
-        }
-    }
-
-    /// A hidden draw target.
-    ///
-    /// This forces a progress bar to be not rendered at all.
-    pub fn hidden() -> ProgressDrawTarget {
-        ProgressDrawTarget {
-            kind: ProgressDrawTargetKind::Hidden,
+            kind: ProgressDrawTargetKind::Term(term, None, rate),
         }
     }
 
@@ -129,7 +135,6 @@ impl ProgressDrawTarget {
     /// from drawing can be prevented.
     pub fn is_hidden(&self) -> bool {
         match self.kind {
-            ProgressDrawTargetKind::Hidden => true,
             ProgressDrawTargetKind::Term(ref term, ..) => !term.is_term(),
             _ => false,
         }
@@ -142,7 +147,8 @@ impl ProgressDrawTarget {
             return Ok(());
         }
         match self.kind {
-            ProgressDrawTargetKind::Term(ref term, ref mut last_state, rate, ref mut last_draw) => {
+            ProgressDrawTargetKind::Term(ref term, ref mut last_state, rate) => {
+                let last_draw = last_state.as_ref().map(|x| x.ts);
                 if draw_state.finished
                     || draw_state.force_draw
                     || rate.is_none()
@@ -159,7 +165,6 @@ impl ProgressDrawTarget {
                     draw_state.draw_to_term(term)?;
                     term.flush()?;
                     *last_state = Some(draw_state);
-                    *last_draw = Some(Instant::now());
                 }
             }
             ProgressDrawTargetKind::Remote(idx, ref chan) => {
@@ -169,7 +174,6 @@ impl ProgressDrawTarget {
                     .send((idx, draw_state))
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, e));
             }
-            ProgressDrawTargetKind::Hidden => {}
         }
         Ok(())
     }
@@ -177,7 +181,7 @@ impl ProgressDrawTarget {
     /// Properly disconnects from the draw target
     fn disconnect(&self) {
         match self.kind {
-            ProgressDrawTargetKind::Term(..) => {}
+            ProgressDrawTargetKind::Term(_, _, _) => {}
             ProgressDrawTargetKind::Remote(idx, ref chan) => {
                 chan.lock()
                     .unwrap()
@@ -189,11 +193,11 @@ impl ProgressDrawTarget {
                             finished: true,
                             force_draw: false,
                             move_cursor: false,
+                            ts: Instant::now(),
                         },
                     ))
                     .ok();
             }
-            ProgressDrawTargetKind::Hidden => {}
         };
     }
 }
@@ -247,20 +251,16 @@ impl ProgressState {
 
     /// Indicates that the progress bar finished.
     pub fn is_finished(&self) -> bool {
-        match self.status {
-            Status::InProgress => false,
-            Status::DoneVisible => true,
-            Status::DoneHidden => true,
+        match self.status.kind {
+            StatusKind::Done => true,
+            StatusKind::InProgress => false,
         }
     }
 
     /// Returns `false` if the progress bar should no longer be
     /// drawn.
     pub fn should_render(&self) -> bool {
-        match self.status {
-            Status::DoneHidden => false,
-            _ => true,
-        }
+        self.status.visible
     }
 
     /// Returns the completion as a floating-point number between 0 and 1
@@ -354,7 +354,9 @@ impl ProgressBar {
     /// This progress bar still responds to API changes but it does not
     /// have a length or render in any way.
     pub fn hidden() -> ProgressBar {
-        ProgressBar::with_draw_target(!0, ProgressDrawTarget::hidden())
+        let pb = ProgressBar::new(!0);
+        pb.set_visible(false);
+        pb
     }
 
     /// Creates a new progress bar with a given length and draw target.
@@ -371,7 +373,7 @@ impl ProgressBar {
                 tick: 0,
                 draw_delta: 0,
                 draw_next: 0,
-                status: Status::InProgress,
+                status: Status::default(),
                 started: Instant::now(),
                 est: Estimate::new(),
                 tick_thread: None,
@@ -496,12 +498,24 @@ impl ProgressBar {
         })
     }
 
-    /// A quick convenience check if the progress bar is hidden.
-    pub fn is_hidden(&self) -> bool {
-        self.state.read().unwrap().draw_target.is_hidden()
+    /// Changes the progress bar's visibility. `ProgressBar::println` will still print to the console
+    /// even after setting visibility to `false`.
+    ///
+    /// **Note:** Even after setting visibility to `true`, the progress bar may not be drawn if
+    /// the draw target is hidden (see `ProgressDrawTarget::is_hidden`).
+    pub fn set_visible(&self, visible: bool) {
+        self.update_and_draw(|state| {
+            state.status.visible = visible;
+        })
     }
 
-    // Indicates that the progress bar finished.
+    /// Returns true when the progress bar is visible _and_ the draw target is not hidden.
+    pub fn is_visible(&self) -> bool {
+        let state = self.state.read().unwrap();
+        state.status.visible && !state.draw_target.is_hidden()
+    }
+
+    /// Indicates that the progress bar finished.
     pub fn is_finished(&self) -> bool {
         self.state.read().unwrap().is_finished()
     }
@@ -529,6 +543,7 @@ impl ProgressBar {
             finished: state.is_finished(),
             force_draw: true,
             move_cursor: false,
+            ts: Instant::now(),
         };
 
         state.draw_target.apply_draw_state(draw_state).ok();
@@ -563,8 +578,8 @@ impl ProgressBar {
     ///
     /// For the prefix to be visible, `{prefix}` placeholder
     /// must be present in the template (see `ProgressStyle`).
-    pub fn set_prefix(&self, prefix: &str) {
-        let prefix = prefix.to_string();
+    pub fn set_prefix<I: Into<String>>(&self, prefix: I) {
+        let prefix = prefix.into();
         self.update_and_draw(|state| {
             state.prefix = prefix;
             if state.steady_tick == 0 || state.tick == 0 {
@@ -577,14 +592,21 @@ impl ProgressBar {
     ///
     /// For the message to be visible, `{msg}` placeholder
     /// must be present in the template (see `ProgressStyle`).
-    pub fn set_message(&self, msg: &str) {
-        let msg = msg.to_string();
+    pub fn set_message<I: Into<String>>(&self, msg: I) {
+        let msg = msg.into();
         self.update_and_draw(|state| {
             state.message = msg;
             if state.steady_tick == 0 || state.tick == 0 {
                 state.tick = state.tick.saturating_add(1);
             }
         })
+    }
+
+    /// Creates a new Weak pointer to this ProgressBar.
+    pub fn downgrade(this: &Self) -> WeakProgressBar {
+        WeakProgressBar {
+            state: Arc::downgrade(&this.state),
+        }
     }
 
     /// Resets the ETA calculation.
@@ -610,7 +632,7 @@ impl ProgressBar {
         self.update_and_draw(|state| {
             state.draw_next = 0;
             state.pos = 0;
-            state.status = Status::InProgress;
+            state.status.kind = StatusKind::InProgress;
         });
     }
 
@@ -619,7 +641,7 @@ impl ProgressBar {
         self.update_and_draw(|state| {
             state.pos = state.len;
             state.draw_next = state.pos;
-            state.status = Status::DoneVisible;
+            state.status.kind = StatusKind::Done;
         });
     }
 
@@ -627,7 +649,7 @@ impl ProgressBar {
     pub fn finish_at_current_pos(&self) {
         self.update_and_draw(|state| {
             state.draw_next = state.pos;
-            state.status = Status::DoneVisible;
+            state.status.kind = StatusKind::Done;
         });
     }
 
@@ -635,13 +657,14 @@ impl ProgressBar {
     ///
     /// For the message to be visible, `{msg}` placeholder
     /// must be present in the template (see `ProgressStyle`).
-    pub fn finish_with_message(&self, msg: &str) {
-        let msg = msg.to_string();
+    pub fn finish_with_message<I: Into<String>>(&self, msg: I) {
+        let msg = msg.into();
         self.update_and_draw(|state| {
             state.message = msg;
             state.pos = state.len;
             state.draw_next = state.pos;
-            state.status = Status::DoneVisible;
+            state.status.kind = StatusKind::Done;
+            state.status.visible = true;
         });
     }
 
@@ -650,14 +673,15 @@ impl ProgressBar {
         self.update_and_draw(|state| {
             state.pos = state.len;
             state.draw_next = state.pos;
-            state.status = Status::DoneHidden;
+            state.status.kind = StatusKind::Done;
+            state.status.visible = false;
         });
     }
 
     /// Finishes the progress bar and leaves the current message and progress.
     pub fn abandon(&self) {
         self.update_and_draw(|state| {
-            state.status = Status::DoneVisible;
+            state.status.kind = StatusKind::Done;
         });
     }
 
@@ -669,7 +693,8 @@ impl ProgressBar {
         let msg = msg.to_string();
         self.update_and_draw(|state| {
             state.message = msg;
-            state.status = Status::DoneVisible;
+            state.status.kind = StatusKind::Done;
+            state.status.visible = true;
         });
     }
 
@@ -793,8 +818,27 @@ fn draw_state(state: &mut ProgressState) -> io::Result<()> {
         finished: state.is_finished(),
         force_draw: false,
         move_cursor: false,
+        ts: Instant::now(),
     };
     state.draw_target.apply_draw_state(draw_state)
+}
+
+/// A weak reference to a progress bar or spinner.
+///
+/// Useful for creating custom steady tick implementations
+#[derive(Clone)]
+pub struct WeakProgressBar {
+    state: Weak<RwLock<ProgressState>>
+}
+
+impl WeakProgressBar {
+    /// Attempts to upgrade the Weak pointer to a ProgressBar, delaying dropping of the inner value
+    /// if successful. Returns None if the inner value has since been dropped.
+    fn upgrade(&self) -> Option<ProgressBar> {
+        self.state.upgrade().map(|state| ProgressBar {
+            state
+        })
+    }
 }
 
 impl Drop for ProgressState {
@@ -803,7 +847,7 @@ impl Drop for ProgressState {
             return;
         }
 
-        self.status = Status::DoneHidden;
+        self.status.kind = StatusKind::Done;
         if self.pos >= self.draw_next {
             self.draw_next = self.pos.saturating_add(self.draw_delta);
             draw_state(self).ok();
@@ -825,16 +869,14 @@ fn test_pbar_maxu64() {
 
 #[test]
 fn test_pbar_overflow() {
-    let pb = ProgressBar::new(1);
-    pb.set_draw_target(ProgressDrawTarget::hidden());
+    let pb = ProgressBar::hidden();
     pb.inc(2);
     pb.finish();
 }
 
 #[test]
 fn test_get_position() {
-    let pb = ProgressBar::new(1);
-    pb.set_draw_target(ProgressDrawTarget::hidden());
+    let pb = ProgressBar::hidden();
     pb.inc(2);
     let pos = pb.position();
     assert_eq!(pos, 2);
@@ -849,14 +891,14 @@ struct MultiProgressState {
     objects: Vec<MultiObject>,
     draw_target: ProgressDrawTarget,
     move_cursor: bool,
+    visible: bool,
 }
 
 /// Manages multiple progress bars from different threads.
 pub struct MultiProgress {
     state: RwLock<MultiProgressState>,
-    joining: AtomicBool,
     tx: Sender<(usize, ProgressDrawState)>,
-    rx: Receiver<(usize, ProgressDrawState)>,
+    rx: Mutex<Receiver<(usize, ProgressDrawState)>>,
 }
 
 impl fmt::Debug for MultiProgress {
@@ -891,10 +933,10 @@ impl MultiProgress {
                 objects: vec![],
                 draw_target,
                 move_cursor: false,
+                visible: true,
             }),
-            joining: AtomicBool::new(false),
             tx,
-            rx,
+            rx: Mutex::new(rx),
         }
     }
 
@@ -911,6 +953,21 @@ impl MultiProgress {
     /// progress bars.
     pub fn set_move_cursor(&self, move_cursor: bool) {
         self.state.write().unwrap().move_cursor = move_cursor;
+    }
+
+    /// Changes the progress bar's visibility. `ProgressBar::println` will still print to the console
+    /// even after setting visibility to `false`.
+    ///
+    /// **Note:** Even after setting visibility to `true`, the progress bar may not be drawn if
+    /// the draw target is hidden (see `ProgressDrawTarget::is_hidden`).
+    pub fn set_visible(&self, visible: bool) {
+        self.state.write().unwrap().visible = visible;
+    }
+
+    /// Returns true when the progress bar is visible _and_ the draw target is not hidden.
+    pub fn is_visible(&self) -> bool {
+        let state = self.state.read().unwrap();
+        state.visible && !state.draw_target.is_hidden()
     }
 
     /// Adds a progress bar.
@@ -933,19 +990,34 @@ impl MultiProgress {
 
     /// Waits for all progress bars to report that they are finished.
     ///
-    /// You need to call this as this will request the draw instructions
-    /// from the remote progress bars.  Not calling this will deadlock
-    /// your program.
+    /// You need to call this or `tick` as this will request the draw instructions
+    /// from the remote progress bars. Not calling this will deadlock your program.
     pub fn join(&self) -> io::Result<()> {
-        self.join_impl(false)
+        self.join_impl(false, None)
     }
 
     /// Works like `join` but clears the progress bar in the end.
     pub fn join_and_clear(&self) -> io::Result<()> {
-        self.join_impl(true)
+        self.join_impl(true, None)
     }
 
-    fn is_done(&self) -> bool {
+    /// Blocks only as long as the `time_limit` allows for.
+    /// Requires to be called as long as `is_done` returns false to prevent
+    /// deadlocking your program.
+    ///
+    /// You need to call this or `join` as this will request the draw instructions
+    /// from the remote progress bars. Not calling this will deadlock your program.
+    pub fn tick(&self, time_limit: TickTimeLimit) -> io::Result<()> {
+        self.join_impl(false, Some(time_limit))
+    }
+
+    /// Works like `tick` but if it so happens that the progress bar finishes
+    /// before updating ends it also clears the progress bar.
+    pub fn tick_and_clear(&self, time_limit: TickTimeLimit) -> io::Result<()> {
+        self.join_impl(true, Some(time_limit))
+    }
+
+    pub fn is_done(&self) -> bool {
         let state = self.state.read().unwrap();
         if state.objects.is_empty() {
             return true;
@@ -958,15 +1030,25 @@ impl MultiProgress {
         true
     }
 
-    fn join_impl(&self, clear: bool) -> io::Result<()> {
-        if self.joining.load(Ordering::Acquire) {
-            panic!("Already joining!");
-        }
-        self.joining.store(true, Ordering::Release);
+    fn join_impl(&self, clear: bool, time_limit: Option<TickTimeLimit>) -> io::Result<()> {
+        let rx = match self.rx.try_lock() {
+            Err(TryLockError::WouldBlock) => panic!("Update already in progress"),
+            rx => rx.unwrap(),
+        };
 
         let move_cursor = self.state.read().unwrap().move_cursor;
+        let time_tracker: TickTimeTracker = time_limit.into();
         while !self.is_done() {
-            let (idx, draw_state) = self.rx.recv().unwrap();
+            let (idx, draw_state) = match time_tracker.time_left() {
+                TickTimeLeft::CanBlock => rx.recv().unwrap(),
+                TickTimeLeft::CanProbe => match rx.try_recv() {
+                    Err(TryRecvError::Empty) => return Ok(()),
+                    recv => recv.unwrap(),
+                },
+                TickTimeLeft::None => return Ok(()),
+            };
+
+            let ts = draw_state.ts;
             let force_draw = draw_state.finished || draw_state.force_draw;
 
             let mut state = self.state.write().unwrap();
@@ -1002,9 +1084,11 @@ impl MultiProgress {
             let orphan_lines_count = orphan_lines.len();
             lines.extend(orphan_lines);
 
-            for obj in state.objects.iter() {
-                if let Some(ref draw_state) = obj.draw_state {
-                    lines.extend_from_slice(&draw_state.lines[..]);
+            if state.visible {
+                for obj in state.objects.iter() {
+                    if let Some(ref draw_state) = obj.draw_state {
+                        lines.extend_from_slice(&draw_state.lines[..]);
+                    }
                 }
             }
 
@@ -1016,6 +1100,7 @@ impl MultiProgress {
                 force_draw,
                 move_cursor,
                 finished,
+                ts,
             })?;
         }
 
@@ -1027,12 +1112,73 @@ impl MultiProgress {
                 finished: true,
                 force_draw: true,
                 move_cursor,
+                ts: Instant::now(),
             })?;
         }
 
-        self.joining.store(false, Ordering::Release);
-
         Ok(())
+    }
+}
+
+/// Defines an upper time limit for a single `MultiProgress` bar tick. A tick may contain multiple
+/// internal updates. Each update comes from a single child progress bar and contains an internal
+/// state change.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum TickTimeLimit {
+    /// Function will block until there isn't any immediately available state update.
+    Indefinite,
+    /// Function will block at most until duration elapses (counting from just before the
+    /// first update) and at least until there isn't any immediately available state update.
+    Timeout(Duration),
+    /// Function will block at most until the instant and at least until there isn't any
+    /// immediately available state update.
+    Deadline(Instant),
+}
+
+enum TickTimeTracker {
+    /// A `join` function call
+    Unlimited,
+    Indefinite,
+    Deadline(Instant),
+}
+
+enum TickTimeLeft {
+    /// Caller can indefinitely block the thread waiting for updates
+    CanBlock,
+    /// Caller can block as long as there are continuous updates
+    CanProbe,
+    /// The allocated time has run out and the caller must return
+    None,
+}
+
+impl TickTimeTracker {
+    fn time_left(&self) -> TickTimeLeft {
+        match self {
+            TickTimeTracker::Unlimited => TickTimeLeft::CanBlock,
+            TickTimeTracker::Deadline(deadline) => {
+                if *deadline > Instant::now() {
+                    TickTimeLeft::CanProbe
+                } else {
+                    TickTimeLeft::None
+                }
+            }
+            TickTimeTracker::Indefinite => TickTimeLeft::CanProbe,
+        }
+    }
+}
+
+impl From<Option<TickTimeLimit>> for TickTimeTracker {
+    fn from(limit: Option<TickTimeLimit>) -> Self {
+        match limit {
+            Some(limit) => match limit {
+                TickTimeLimit::Indefinite => TickTimeTracker::Indefinite,
+                TickTimeLimit::Timeout(duration) => {
+                    TickTimeTracker::Deadline(Instant::now() + duration)
+                }
+                TickTimeLimit::Deadline(instant) => TickTimeTracker::Deadline(instant),
+            },
+            None => TickTimeTracker::Unlimited,
+        }
     }
 }
 

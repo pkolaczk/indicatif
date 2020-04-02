@@ -1,7 +1,7 @@
 use std::fmt;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Weak};
 use std::sync::{Mutex, RwLock, TryLockError};
 use std::thread;
@@ -605,7 +605,7 @@ impl ProgressBar {
     /// Creates a new Weak pointer to this ProgressBar.
     pub fn downgrade(&self) -> WeakProgressBar {
         WeakProgressBar {
-            state: Arc::downgrade(&this.state),
+            state: Arc::downgrade(&self.state),
         }
     }
 

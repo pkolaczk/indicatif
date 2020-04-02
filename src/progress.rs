@@ -2,7 +2,7 @@ use std::fmt;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::sync::{Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -591,6 +591,13 @@ impl ProgressBar {
         })
     }
 
+    /// Creates a new Weak pointer to this ProgressBar.
+    pub fn downgrade(&self) -> WeakProgressBar {
+        WeakProgressBar {
+            state: Arc::downgrade(&this.state),
+        }
+    }
+
     /// Resets the ETA calculation.
     ///
     /// This can be useful if progress bars make a huge jump or were
@@ -800,6 +807,24 @@ fn draw_state(state: &mut ProgressState) -> io::Result<()> {
         ts: Instant::now(),
     };
     state.draw_target.apply_draw_state(draw_state)
+}
+
+/// A weak reference to a progress bar or spinner.
+///
+/// Useful for creating custom steady tick implementations
+#[derive(Clone)]
+pub struct WeakProgressBar {
+    state: Weak<RwLock<ProgressState>>
+}
+
+impl WeakProgressBar {
+    /// Attempts to upgrade the Weak pointer to a ProgressBar, delaying dropping of the inner value
+    /// if successful. Returns None if the inner value has since been dropped.
+    pub fn upgrade(&self) -> Option<ProgressBar> {
+        self.state.upgrade().map(|state| ProgressBar {
+            state
+        })
+    }
 }
 
 impl Drop for ProgressState {

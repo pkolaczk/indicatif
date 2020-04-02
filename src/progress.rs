@@ -2,8 +2,7 @@ use std::fmt;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Weak};
-use std::sync::{Mutex, RwLock, TryLockError};
+use std::sync::{Arc, Weak, Mutex, RwLock, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 

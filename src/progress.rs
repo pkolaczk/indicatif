@@ -24,8 +24,6 @@ struct ProgressDrawState {
     pub force_draw: bool,
     /// True if we should move the cursor up when possible instead of clearing lines.
     pub move_cursor: bool,
-    /// Time when the draw state was created.
-    pub ts: Instant,
 }
 
 #[derive(Debug)]
@@ -36,7 +34,7 @@ enum Status {
 }
 
 enum ProgressDrawTargetKind {
-    Term(Term, Option<ProgressDrawState>, Option<Duration>),
+    Term(Term, Option<ProgressDrawState>, Option<Duration>, Option<Instant>),
     Remote(usize, Mutex<Sender<(usize, ProgressDrawState)>>),
     Hidden,
 }
@@ -112,7 +110,7 @@ impl ProgressDrawTarget {
     pub fn to_term(term: Term, refresh_rate: impl Into<Option<u64>>) -> ProgressDrawTarget {
         let rate = refresh_rate.into().map(|x| Duration::from_millis(1000 / x));
         ProgressDrawTarget {
-            kind: ProgressDrawTargetKind::Term(term, None, rate),
+            kind: ProgressDrawTargetKind::Term(term, None, rate, None),
         }
     }
 
@@ -144,8 +142,7 @@ impl ProgressDrawTarget {
             return Ok(());
         }
         match self.kind {
-            ProgressDrawTargetKind::Term(ref term, ref mut last_state, rate) => {
-                let last_draw = last_state.as_ref().map(|x| x.ts);
+            ProgressDrawTargetKind::Term(ref term, ref mut last_state, rate, ref mut last_draw) => {
                 if draw_state.finished
                     || draw_state.force_draw
                     || rate.is_none()
@@ -162,6 +159,7 @@ impl ProgressDrawTarget {
                     draw_state.draw_to_term(term)?;
                     term.flush()?;
                     *last_state = Some(draw_state);
+                    *last_draw = Some(Instant::now());
                 }
             }
             ProgressDrawTargetKind::Remote(idx, ref chan) => {
@@ -179,7 +177,7 @@ impl ProgressDrawTarget {
     /// Properly disconnects from the draw target
     fn disconnect(&self) {
         match self.kind {
-            ProgressDrawTargetKind::Term(_, _, _) => {}
+            ProgressDrawTargetKind::Term(..) => {}
             ProgressDrawTargetKind::Remote(idx, ref chan) => {
                 chan.lock()
                     .unwrap()
@@ -191,7 +189,6 @@ impl ProgressDrawTarget {
                             finished: true,
                             force_draw: false,
                             move_cursor: false,
-                            ts: Instant::now(),
                         },
                     ))
                     .ok();
@@ -532,7 +529,6 @@ impl ProgressBar {
             finished: state.is_finished(),
             force_draw: true,
             move_cursor: false,
-            ts: Instant::now(),
         };
 
         state.draw_target.apply_draw_state(draw_state).ok();
@@ -797,7 +793,6 @@ fn draw_state(state: &mut ProgressState) -> io::Result<()> {
         finished: state.is_finished(),
         force_draw: false,
         move_cursor: false,
-        ts: Instant::now(),
     };
     state.draw_target.apply_draw_state(draw_state)
 }
@@ -972,7 +967,6 @@ impl MultiProgress {
         let move_cursor = self.state.read().unwrap().move_cursor;
         while !self.is_done() {
             let (idx, draw_state) = self.rx.recv().unwrap();
-            let ts = draw_state.ts;
             let force_draw = draw_state.finished || draw_state.force_draw;
 
             let mut state = self.state.write().unwrap();
@@ -1022,7 +1016,6 @@ impl MultiProgress {
                 force_draw,
                 move_cursor,
                 finished,
-                ts,
             })?;
         }
 
@@ -1034,7 +1027,6 @@ impl MultiProgress {
                 finished: true,
                 force_draw: true,
                 move_cursor,
-                ts: Instant::now(),
             })?;
         }
 

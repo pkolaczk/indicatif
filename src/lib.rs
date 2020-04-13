@@ -154,12 +154,19 @@
 //! * `bytes`: renders the current position of the bar as bytes.
 //! * `percent`: renders the current position of the bar as a percentage of the total length.
 //! * `total_bytes`: renders the total length of the bar as bytes.
-//! * `elapsed_precise`: renders the elapsed time as `HH:MM:SS`.
-//! * `elapsed`: renders the elapsed time as `42s`, `1m` etc.
+//! * `elapsed_precise`<sup>[1]</sup>: renders the elapsed time as `HH:MM:SS`.
+//! * `elapsed`<sup>[1]</sup>: renders the elapsed time as `42s`, `1m` etc.
 //! * `per_sec`: renders the speed in steps per second.
 //! * `bytes_per_sec`: renders the speed in bytes per second.
 //! * `eta_precise`: the remaining time (like `elapsed_precise`).
 //! * `eta`: the remaining time (like `elapsed`).
+//!
+//! [1]: In order for `elapsed` and `elapsed_precise` to work properly you need to make sure
+//!      the progress bar is updated every second. If you aren't certain that your code will
+//!      update often enough or a progressbar skips seconds you can use
+//!      `ProgressBar::enable_steady_tick`. That way you can be sure time is properly updated.
+//!      *Note*: calling `MultiProgress::join` is not sufficient for Progressbars to keep track
+//!      of time.
 //!
 //! The design of the progress bar can be altered with the integrated
 //! template functionality.  The template can be set by changing a

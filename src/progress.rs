@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use crate::style::ProgressStyle;
 use crate::utils::{duration_to_secs, secs_to_duration, Estimate};
-use console::Term;
 use crate::ProgressBarIter;
+use console::Term;
 
 /// The drawn state of an element.
 #[derive(Clone, Debug)]
@@ -1065,7 +1065,7 @@ mod tests {
         let writer = Vec::new();
         let mut writer = pb.wrap_write(writer);
         io::copy(&mut reader, &mut writer).unwrap();
-        // assert_eq!(writer.wrap, bytes);
+        assert_eq!(writer.into_inner().0, bytes);
     }
 
     #[test]

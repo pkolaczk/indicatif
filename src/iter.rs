@@ -38,6 +38,10 @@ impl<T> ProgressBarIter<T> {
     pub fn new(inner: T, progress: ProgressBar) -> Self {
         Self { inner, progress }
     }
+
+    pub fn into_inner(self) -> (T, ProgressBar) {
+        (self.inner, self.progress)
+    }
 }
 
 impl<S, T: Iterator<Item = S>> Iterator for ProgressBarIter<T> {

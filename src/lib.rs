@@ -181,6 +181,8 @@
 
 mod format;
 mod iter;
+#[cfg(feature = "with_rayon")]
+mod par_iter;
 mod progress;
 mod style;
 mod utils;
@@ -191,4 +193,4 @@ pub use crate::progress::{MultiProgress, ProgressBar, ProgressDrawTarget};
 pub use crate::style::ProgressStyle;
 
 #[cfg(feature = "with_rayon")]
-pub use iter::rayon_support::{ParProgressBarIter, ParallelProgressIterator};
+pub use par_iter::{ParProgressBarIter, ParallelProgressIterator};

@@ -701,6 +701,14 @@ impl ProgressBar {
         state.draw_target = target;
     }
 
+    #[cfg(feature = "with_rayon")]
+    pub fn wrap_par_iter<It: rayon::iter::ParallelIterator>(
+        &self,
+        it: It,
+    ) -> crate::ParProgressBarIter<It> {
+        crate::ParProgressBarIter::new(it, self.clone())
+    }
+
     /// Wraps an iterator with the progress bar.
     ///
     /// ```rust,no_run

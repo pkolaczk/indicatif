@@ -149,6 +149,12 @@ pub mod rayon_support {
         progress: Arc<Mutex<ProgressBar>>,
     }
 
+    impl<T> ParProgressBarIter<T> {
+        pub(crate) fn new(it: T, progress: ProgressBar) -> Self {
+            Self { it, progress: Arc::new(Mutex::new(progress)) }
+        }
+    }
+
     /// Wraps a Rayon parallel iterator.
     ///
     /// See [`ProgressIterator`](trait.ProgressIterator.html) for method

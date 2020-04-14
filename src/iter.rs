@@ -138,20 +138,19 @@ impl<S: io::Seek> io::Seek for ProgressBarIter<S> {
 
 #[cfg(feature = "with_rayon")]
 pub mod rayon_support {
-    use super::*;
+    use crate::ProgressBar;
     use rayon::iter::{
         plumbing::Consumer, plumbing::Folder, plumbing::UnindexedConsumer, ParallelIterator,
     };
-    use std::sync::{Arc, Mutex};
 
     pub struct ParProgressBarIter<T> {
         it: T,
-        progress: Arc<Mutex<ProgressBar>>,
+        progress: ProgressBar,
     }
 
     impl<T> ParProgressBarIter<T> {
         pub(crate) fn new(it: T, progress: ProgressBar) -> Self {
-            Self { it, progress: Arc::new(Mutex::new(progress)) }
+            Self { it, progress }
         }
     }
 
@@ -161,7 +160,7 @@ pub mod rayon_support {
     /// documentation.
     pub trait ParallelProgressIterator
     where
-        Self: Sized,
+        Self: Sized + ParallelIterator,
     {
         fn progress_with(self, progress: ProgressBar) -> ParProgressBarIter<Self>;
 
@@ -176,20 +175,17 @@ pub mod rayon_support {
 
     impl<S: Send, T: ParallelIterator<Item = S>> ParallelProgressIterator for T {
         fn progress_with(self, progress: ProgressBar) -> ParProgressBarIter<Self> {
-            ParProgressBarIter {
-                it: self,
-                progress: Arc::new(Mutex::new(progress)),
-            }
+            ParProgressBarIter { it: self, progress }
         }
     }
 
     struct ProgressConsumer<C> {
         base: C,
-        progress: Arc<Mutex<ProgressBar>>,
+        progress: ProgressBar,
     }
 
     impl<C> ProgressConsumer<C> {
-        fn new(base: C, progress: Arc<Mutex<ProgressBar>>) -> Self {
+        fn new(base: C, progress: ProgressBar) -> Self {
             ProgressConsumer { base, progress }
         }
     }
@@ -203,7 +199,7 @@ pub mod rayon_support {
             let (left, right, reducer) = self.base.split_at(index);
             (
                 ProgressConsumer::new(left, self.progress.clone()),
-                ProgressConsumer::new(right, self.progress.clone()),
+                ProgressConsumer::new(right, self.progress),
                 reducer,
             )
         }
@@ -211,7 +207,7 @@ pub mod rayon_support {
         fn into_folder(self) -> Self::Folder {
             ProgressFolder {
                 base: self.base.into_folder(),
-                progress: self.progress.clone(),
+                progress: self.progress,
             }
         }
 
@@ -232,14 +228,14 @@ pub mod rayon_support {
 
     struct ProgressFolder<C> {
         base: C,
-        progress: Arc<Mutex<ProgressBar>>,
+        progress: ProgressBar,
     }
 
     impl<T, C: Folder<T>> Folder<T> for ProgressFolder<C> {
         type Result = C::Result;
 
         fn consume(self, item: T) -> Self {
-            self.progress.lock().unwrap().inc(1);
+            self.progress.inc(1);
             ProgressFolder {
                 base: self.base.consume(item),
                 progress: self.progress,
@@ -259,7 +255,7 @@ pub mod rayon_support {
         type Item = S;
 
         fn drive_unindexed<C: UnindexedConsumer<Self::Item>>(self, consumer: C) -> C::Result {
-            let consumer1 = ProgressConsumer::new(consumer, self.progress.clone());
+            let consumer1 = ProgressConsumer::new(consumer, self.progress);
             self.it.drive_unindexed(consumer1)
         }
     }

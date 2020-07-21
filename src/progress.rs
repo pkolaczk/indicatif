@@ -838,10 +838,7 @@ impl Drop for ProgressState {
         }
 
         self.status = Status::DoneHidden;
-        if self.pos >= self.draw_next {
-            self.draw_next = self.pos.saturating_add(self.draw_delta);
-            draw_state(self).ok();
-        }
+        draw_state(self).ok();
     }
 }
 
@@ -881,6 +878,16 @@ fn test_weak_pb() {
     assert!(weak.upgrade().is_some());
     ::std::mem::drop(pb);
     assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn test_draw_delta_deadlock() {
+    // see issue #187
+    let mpb = MultiProgress::new();
+    let pb = mpb.add(ProgressBar::new(1));
+    pb.set_draw_delta(2);
+    drop(pb);
+    mpb.join().unwrap();
 }
 
 struct MultiObject {
